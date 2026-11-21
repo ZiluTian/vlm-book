@@ -1,0 +1,62 @@
+site_name: From BEV to Tokens — The VLM Handbook for the CV Engineer
+site_description: >-
+  A bite-size, pseudocode-driven book on vision-language models for experienced
+  CV/BEV engineers, built for technical interview prep.
+repo_url: https://github.com/ZiluTian/vlm-book
+docs_dir: docs
+nav:
+  - Home: index.md
+  - Foundations:
+    - What a VLM actually is: ch01-the-landscape.md
+    - The LLM core: ch02-the-llm-refresher.md
+    - CLIP & contrastive pretraining: ch03-clip-contrastive-pretraining.md
+    - Vision encoders: ch04-vision-encoders.md
+    - The connector: ch05-bridging-vision-to-language.md
+  - The blueprint:
+    - LLaVA: ch06-llava-the-blueprint.md
+    - Fine-tuning & alignment: ch07-finetuning-and-alignment.md
+    - The frontier: ch08-the-frontier.md
+  - Production:
+    - Inference & serving: ch09-inference-and-serving.md
+    - VLMs for autonomous driving: ch10-vlms-for-autonomous-driving.md
+    - Evaluation: ch11-evaluation.md
+  - Interview:
+    - The playbook: ch12-interview-playbook.md
+    - Glossary: glossary.md
+theme:
+  name: material
+  logo: material/weather-sunny
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-6
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+      title: Sections
+plugins:
+  - search
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ZiluTian
