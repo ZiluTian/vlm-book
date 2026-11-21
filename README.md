@@ -1,6 +1,6 @@
 # From BEV to Tokens: The VLM Handbook for the CV Engineer
 
-> **Read the book online:** [zilu.tian.github.io/vlm-book](https://zilu.tian.github.io/vlm-book)
+> **Read the book online:** [zilutian.github.io/vlm-book](https://zilutian.github.io/vlm-book/)
 > (rendered with MkDocs Material, rebuilt on every push to `main`)
 
 A bite-size, pseudocode-driven book on **Vision-Language Models** for experienced

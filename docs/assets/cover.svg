@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 150" fill="none">
+  <defs><pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M0 22V0h22" stroke="#83c6c5" stroke-width="2"/></pattern></defs>
+  <g transform="matrix(1,-.16,.48,.8,12,37)"><rect width="154" height="110" rx="3" fill="#173f49" stroke="#99ddd5"/><path d="M66 44h22v22H66z" fill="#ffbd75"/><rect width="154" height="110" fill="url(#grid)"/></g>
+  <path d="M121 65C204 65 224 21 293 51M121 65c97 6 106 37 172 22" stroke="#ffbd75" stroke-dasharray="3 5"/>
+  <g stroke="#8de0d3" fill="#275959"><rect x="293" y="47" width="32" height="42" rx="4"/><rect x="332" y="47" width="32" height="42" rx="4"/><rect x="371" y="47" width="32" height="42" rx="4"/></g>
+  <g fill="#ffbd75"><rect x="424" y="47" width="57" height="42" rx="4"/><rect x="488" y="47" width="61" height="42" rx="4"/></g><path d="M564 68h48m-8-7 8 7-8 7" stroke="#aed1d4" stroke-width="2"/><rect x="623" y="47" width="42" height="42" rx="4" stroke="#ffe0bd" stroke-dasharray="4 4"/>
+  <g font-family="monospace" font-size="12" fill="#d6eded"><text x="22" y="142">01 / PATCH GRID</text><text x="293" y="120">02 / VISION</text><text x="424" y="120">03 / PROMPT</text><text x="603" y="120">04 / NEXT</text></g>
+  <g font-family="monospace" font-size="14" fill="#172f38"><text x="439" y="73">What</text><text x="503" y="73">sign?</text></g>
+</svg>
