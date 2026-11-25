@@ -40,23 +40,48 @@ def similarities(img, txt, logit_scale):
     return exp(logit_scale) * (img @ txt.T)         # [B, B]; scale = 1 / τ
 ```
 
-`sim[i, j]` = how well image *i* matches text *j*. Diagonal = the true pairs.
-Everything off-diagonal in the batch = *free* negatives.
+`sim[i, j]` = how well image *i* matches text *j*. The diagonal contains the
+original image–caption pairs; the off-diagonal entries are the cross-pairs.
 
 ## 3.4 Step 2 — the loss: the batch is the negative set
 
+**What:** for each image, CLIP uses the other captions in the same training
+batch as wrong-answer choices. A caption is positive for its own image and
+treated as negative for the other images. For a batch of three pairs:
+
+| Image | “A dog on grass” | “A train at a station” | “A cup of coffee” |
+|---|---|---|---|
+| Dog photo | **Positive** | Negative | Negative |
+| Train photo | Negative | **Positive** | Negative |
+| Coffee photo | Negative | Negative | **Positive** |
+
+**Why:** you don't have to collect wrong captions separately. Each caption you
+already have becomes a distractor for the other images. With `B` pairs, each
+image gets **1 positive and `B − 1` negatives**.
+
+**How:** for the dog photo, CLIP scores all three captions. Cross-entropy over
+that row rewards assigning a higher score to “A dog on grass” than to the other
+two captions. CLIP also runs the task in reverse: given “A dog on grass,” pick
+the dog photo over the train and coffee photos. That means scoring down the
+column, which the code does by transposing the matrix.
+
 ```python
 def clip_loss(sim):
+    B = sim.shape[0]
     labels = arange(B)                    # row i's positive is column i
     loss_i2t = cross_entropy(sim, labels)      # softmax over columns (text side)
     loss_t2i = cross_entropy(sim.T, labels)    # softmax over rows    (image side)
     return (loss_i2t + loss_t2i) / 2
 ```
 
-That's InfoNCE with in-batch negatives, written out. Two soft-softmax directions,
-symmetric. **Check:** why two directions? → *the pairings are asymmetric in practice
-(a photo often describes many captions; a caption matches few photos); both
-directions constrain the geometry.*
+The catch: **negative means assumed not to match, not verified wrong.** If the
+batch contains two dog photos, “A dog on grass” might describe both, even though
+standard CLIP treats it as positive for only one. The other match is a *false
+negative*; see the worked example in §3.8 for what it does to the gradient.
+
+**Check:** why run the task in both directions? → *choosing the right caption for
+an image doesn't guarantee that the caption picks the right image. The two
+losses train both retrieval directions.*
 
 ## 3.5 The temperature: the knob that makes web data usable
 
