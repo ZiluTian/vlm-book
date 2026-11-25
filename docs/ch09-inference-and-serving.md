@@ -3,7 +3,7 @@
 > 🎯 **The one sentence:** LLM serving is cache management + scheduling: the KV cache
 > is your memory problem, continuous batching is your throughput problem, FlashAttention
 > is your attention-memory problem, speculative decoding is your latency problem — and
-> vision tokens make every one of them 10× bigger.
+> vision tokens add work at prefill and stay in memory during decode.
 
 ## 9.1 The two phases, one last time (then we stop repeating)
 
@@ -18,10 +18,12 @@ matmuls) — and then decode pays a permanent KV-tax on it (§9.10).*
 
 ## 9.2 Decode bandwidth: the arithmetic that decides hardware
 
-Per decode token, you read (fp16): weights `2·N` bytes + KV `2·T_total·n_kv_heads·head_dim·2` bytes.
-For 7B + 4k context (GQA-8): ~14 GB + ~0.5 GB ≈ **14.5 GB per token**.
-On an H100 (~3 TB/s HBM): theoretical max ≈ 3.3k tok/s — *for a single user*.
-Real serving: 100–400 tok/s/user → the model is bandwidth-starved, not FLOP-starved.
+In a simplified batch-one decode step, FP16 weights cost `2·N` bytes and KV
+reads cost `2·layers·T·kv_heads·head_dim·2` bytes. For 7B parameters and 4,096
+tokens at the §9.3 geometry, that's ~14 GB + 0.54 GB ≈ **14.5 GB per step**.
+At an assumed 3 TB/s of memory bandwidth, the idealized ceiling is
+`3,000 GB/s ÷ 14.5 GB ≈ 207 steps/s`, or **207 tokens/s** for one sequence.
+Compute, kernel launches, and less-than-peak bandwidth bring the real rate down.
 
 **Consequence (say this in interviews):** decode speed is limited by memory
 bandwidth, so (a) fewer/bigger GQA groups help, (b) quantization helps (fewer bytes
@@ -34,16 +36,17 @@ to read), (c) batching helps *throughput* (weights amortized over users) but cos
 class KVCache:
     def __init__(self, n_layers, n_kv_heads, head_dim, max_seq, dtype=fp16):
         self.K = [zeros(max_seq, n_kv_heads*head_dim) for _ in range(n_layers)]
-        self.V = [like(self.K)]
+        self.V = [zeros_like(k) for k in self.K]
     def append(self, layer, k_new, v_new, pos):
         self.K[layer][pos:pos+len(k_new)] = k_new
         self.V[layer][pos:pos+len(v_new)] = v_new
-    # attention at position p: q[p] · K[layer][:p]  (causal slice, no recompute)
+    # After appending token p, q[p] can attend to K[layer][:p+1], including itself.
 ```
 
 Per-user memory = `2 (K+V) × n_layers × n_kv_heads × head_dim × 2 bytes × T_max`.
-7B-GQA @ 32k: 2·32·8·128·2 = 128 KB/token → **4 GB/user**. A 70B (80 layers, 8 kv
-heads): 320 KB/token → **10 GB/user**. That single number explains most serving
+7B-GQA @ 32,768 tokens: 2·32·8·128·2 = 128 KiB/token → **4 GiB/user**. A 70B
+(80 layers, 8 KV heads, head dimension 128): 320 KiB/token → **10 GiB/user**.
+That single number explains most serving
 architecture. (You did this math in §2.14 — now you use it to *design*.)
 
 ## 9.4 Paged KV: vLLM's core idea
@@ -65,9 +68,8 @@ Payoffs: ~no reserved waste, **zero copy** between prefill and decode (same bloc
 and — the killer feature — **prefix sharing**: two requests with the same system
 prompt (or the same cached image!) literally share physical KV blocks.
 
-**Check:** why is "prefix sharing" a *memory* feature and not a compute feature?
-→ *the shared blocks are never re-read for compute savings alone — they stop being
-*allocated per request*. One system prompt, 1k users: KV for it lives once.*
+**Check:** what does an exact prefix hit save? → *it avoids recomputing prefix KV
+and can share those physical blocks. Decode still attends to the prefix.*
 
 ## 9.5 Continuous batching: the scheduler that made serving real
 
@@ -115,12 +117,18 @@ blocks in SRAM and fuses the elementwise ops — fewer bytes moved, same FLOPs.*
 
 ## 9.7 Prefix caching (the MLLM superpower)
 
-Anything that repeats across requests — system prompt, few-shot examples, **the
-image tokens of a long multi-turn chat with the same image** — can be cached:
-request 5 of the same image+conversation re-encodes *nothing* visual; it just
-attaches to the existing KV. For VLM products (document Q&A, dashboard monitoring,
-AV clip review) this is often a **10× prefill cost cut**. Design note: cache keys
-must be byte-exact (template! image bytes! resolution bucket!).
+There are two different caches. A **vision-feature cache** reuses the encoder
+output for an image processed the same way, even if preceding text changes.
+A **decoder prefix cache** reuses KV only for the identical ordered prefix,
+including the image identity and position: at deeper layers, visual KV depends
+on earlier text too. Key reuse on the model/adapter revision, the formatted
+prefix, and the effective image preprocessing, not just the placeholder ID.
+
+For example, `[system, image, question A]` and `[system, image, question B]`
+can share complete KV blocks through their common prefix. Insert different
+instructions *before* the image and you may still reuse the vision features,
+but not the image's decoder KV. Test both cases separately and compare hit rates
+and time to first token with the caches disabled and enabled.
 
 **Check:** what breaks prefix caching in a VLM product? → *anything that changes the
 byte prefix: adaptive resolution that varies per call, template drift, different
@@ -167,9 +175,10 @@ prefill (compute-bound, fewer FLOPs via int8 tensor cores).*
 ## 9.10 MLLM serving: vision token economics
 
 Per-image costs, made explicit (336 px, 576 tokens, 7B-GQA):
-- prefill: +576 into S → attention +576·D·2·… and S² growth;
-- decode: +576 × 128 KB = **+72 MB of KV** for the *entire conversation*;
-- tiled hi-res (2880 tokens): +360 MB. Now you *see* why token budgets are product
+- prefill: for `T` text tokens and `P` extra visual tokens, causal attention adds
+  `T·P + P·(P+1)/2` query–key pairs per head per layer, besides the added matmuls;
+- decode: +576 × 128 KiB = **+72 MiB of KV** while the image stays in context;
+- tiled hi-res (2880 tokens): +360 MiB. Now you *see* why token budgets are product
   decisions.
 Standard levers, in order: (1) don't over-tile; (2) prefix-cache the image across
 turns; (3) prune vision KV post-prefill (§8.4); (4) quantize KV; (5) smaller GQA.
@@ -183,13 +192,32 @@ summaries. Rerouting beats raw context.*
 
 Given: model N params, context T, batch b, tok/s target.
 1. **Memory:** weights (N×bytes) + KV (b×T×KV/token) + activations ≈ fits where?
-2. **Throughput:** bandwidth ÷ bytes-per-step ÷ b → tok/s/user; ×b → tok/s total.
-3. **Cost:** $/GPU-hour ÷ (tok/s × 3600) → $/1M tokens. Compare to API price.
-Worked example: 7B-int4 (~4 GB) on 1×H100, 1k users × 8k ctx, KV 128 KB/token
-→ KV alone ≈ 10 GB ×… wait: 1k×8k×128KB = **1 TB** — doesn't fit; answer: GQA is
-already small, so *quantize KV to int8 (halve), cap context at 4k (halve), and
-you're at ~250 GB → 2–4 H100s + vLLM paging*. The *structure* of that reasoning is
-what they grade, not the exact factor of two.
+2. **Throughput:** bandwidth ÷ bytes per *batched step* gives steps/s, hence
+   tokens/s per active sequence if each step emits one token for it. Multiply by
+   active batch size for aggregate decode throughput in this idealization.
+3. **Cost:** `(GPU cost/hour × 1,000,000) / (measured output tok/s × 3,600)`
+   gives GPU cost per million output tokens. Measure with representative
+   prefill and decode traffic, rather than pricing the decode-only ceiling.
+
+### Worked example: budget a burst of document questions
+
+**Why:** a model can fit on the GPU at idle but run out of KV space when several
+large requests arrive together. Daily request counts can't tell you whether a burst fits.
+
+**What:** budget for 64 active requests, each with 2,880 visual tokens, 512 text
+tokens, and room for 256 generated tokens. At 128 KiB/token, that's 456 MiB per
+request or **28.5 GiB** of live KV, before weights, workspaces, and page overhead.
+Capping vision at 576 tokens lowers the same budget to **10.5 GiB**. Separately,
+the prefill sequence shrinks from 3,392 to 1,088 tokens: about **9.7× fewer
+causal attention pairs**, not 9.7× less total prefill time.
+
+**How:** enforce a per-request token cap and use the live KV block count for
+admission. Load-test a representative mix of short prompts and tiled documents
+at burst concurrency. Measure p95 time to first token (including queue and ViT),
+p95 time between output tokens, and high-water KV usage. If long prefills hurt
+the inter-token tail for other users, test chunked prefill. If KV fills up first,
+reduce the admitted token budget or test KV quantization. Before adopting the
+lower image cap, check that small-text accuracy still meets the product target.
 
 **Check:** what single change usually has the biggest cost impact in a VLM service?
 → *the vision token budget (how many image tokens per query) — it moves both

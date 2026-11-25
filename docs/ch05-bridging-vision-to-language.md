@@ -24,27 +24,26 @@ stays frozen? → *#3 — the bridge is the only newly-trained part (usually).*
 ## 5.2 Option 1 — one linear layer
 
 ```python
-v = W @ feat + b            # feat: [P, D_v]  →  v: [P, D]
+v = feat @ W.T + b          # feat: [P, D_v], W: [D, D_v] → v: [P, D]
 ```
 
-LLaVA (v1) used exactly this, with a scale ×100 on `v` (image-token embeddings are
-much larger in norm than text embeddings; the scale calibrates them into the same
-regime). One matrix. It works — which is the point: **most of the job is done by
-the ViT and the LLM; the bridge is thin.**
+Original LLaVA used a learned linear projection. It works because **most of the
+job is done by the ViT and the LLM; the bridge is thin.** A fixed multiplier is
+not part of the recipe. If you suspect a scale problem, compare projected feature
+and text embedding norms and test whether it actually changes grounding quality.
 
-**Check:** why the ×100 in LLaVA? → *embedding-norm mismatch: raw projected image
-vectors are small vs text embeddings, so attention under-weights them; the scale
-equalizes their "loudness."*
+**Check:** does matching the LLM's width make the projected tokens meaningful to
+it? → *no; width makes concatenation legal. Training makes the vectors useful.*
 
 ## 5.3 Option 2 — MLP projector (LLaVA-1.5, most open models)
 
 ```python
-v = W2( GELU( W1 @ feat + b1 ) ) + b2      # [P, D_v] → [P, D], D_ff ~ 2D
+v = gelu(feat @ W1.T + b1) @ W2.T + b2   # [P, D_v] → [P, D_hidden] → [P, D]
 ```
 
 A nonlinearity in the bridge. Marginally better alignment, still token-preserving
-(`P` in, `P` out). This is the workhorse: cheap to train, no information loss in
-the projection, no bottleneck.
+(`P` in, `P` out). This avoids a spatial token-count bottleneck, but preserving
+the count does not guarantee that the projection preserves every feature.
 
 **Check:** P in → P out. What does that imply for the token budget? → *nothing is
 reclaimed; budget management must happen upstream (resolution, pooling) or
@@ -77,9 +76,10 @@ camera features, except here the "BEV grid" is a flat bag of 32.)
 **Buys:**
 - **Fixed, tiny token count** (32) regardless of image size → LLM context is cheap
   and predictable. Great when the LLM is small or context is precious.
-- **A training scaffold:** BLIP-2's stage 1 trains *only* the Q-Former (ViT and LLM
-  frozen) on image-text matching/grounding; stage 2 fine-tunes LLM lightly. The
-  queries are the *alignment surface*.
+- **A training scaffold:** BLIP-2 trains the Q-Former against a frozen vision
+  encoder with image-text contrastive, matching, and generation objectives. In
+  stage 2 it connects the queries to a frozen LLM and trains the bridge with a
+  language generation objective.
 
 **Costs:**
 - **Bottleneck:** 576 → 32 is a 18× information squeeze. Fine detail (text in
@@ -106,7 +106,7 @@ LLM layers are doing token-local/linguistic work; mid-late layers do global
 composition — feeding vision at several depths gives each stage a fresh read of the
 image latents.*
 
-## 5.7 Option 5 — spatial pooling (LLaVA-NeXT's 2×2)
+## 5.7 Option 5 — spatial pooling
 
 Keep all tokens through the ViT, then mean-pool each 2×2 block of the feature
 grid into one token:
@@ -117,21 +117,21 @@ grid = feat.view(24, 24, D_v)
 pooled = grid.view(12, 2, 12, 2, D_v).mean(dim=(1, 3))   # [144, D_v]
 ```
 
-576 → 144 tokens for the same image. LLaVA-NeXT does this *plus* a full-image
-"global" token set, so the LLM sees a coarse overview and a pooled detail grid.
-Pooling is the simplest token-budget lever: it's lossy exactly where you're
-downsampling.
+576 → 144 tokens for the same image. This is a generic spatial downsampler, not
+the original LLaVA-NeXT any-resolution recipe (see [Chapter 6](ch06-llava-the-blueprint.md)).
+It cuts decoder cost but not the cost of the already-computed ViT features.
 
 **Check:** 2×2 pooling — what dies first? → *thin structure: edges of text, thin
 gauge, fine texture. If your task is OCR-ish, pool less (or not at all).*
 
-## 5.8 The no-pooling camp (Qwen2-VL)
+## 5.8 Learned spatial merging (Qwen2-VL)
 
-Qwen2-VL keeps **all** tokens at native (dynamic) resolution — 448×448 might be
-32×32 = 1024 tokens — and pays the context cost. Its answers to "how do I afford
-this?": 2D-RoPE (cheap positions), GQA (cheap KV), long-context LLM, and later
-token pruning at inference (Ch 8). The philosophy: *don't lose detail up front;
-spend at inference if you need to.*
+Qwen2-VL uses dynamic resolution but still merges each spatial 2×2 group with
+a learned MLP. At 448×448 with 14-pixel patches, that is a 32×32 patch grid and
+256 visual embeddings sent to the decoder, excluding boundary tokens. Unlike
+mean pooling, the merger sees features in a fixed order within each group, so
+it can learn that a stroke in the top-left patch differs from one in the
+bottom-right. It still compresses those four positions into one decoder token.
 
 **Check:** pool-upfront vs no-pooling — same ViT, same LLM: which is higher quality
 on fine-detail tasks, and what's the price? → *no-pooling wins quality (more
@@ -142,8 +142,8 @@ tokens in), pays prefill FLOPs + KV memory; pooling wins cost.*
 | Connector | Tokens out | Detail | Context cost | Typical user |
 |---|---|---|---|---|
 | Q-Former | 32 (fixed) | low | tiny | small LLMs, summarization |
-| 2×2 pool | P/4 | medium | low | LLaVA-NeXT |
-| Linear/MLP, no pool | P (576…) | high | high | LLaVA-1.5, Qwen2-VL |
+| 2×2 pool / learned merge | P/4 | task-dependent | low | Qwen2-VL (learned merge) |
+| Linear/MLP, no pool | P (576…) | preserves spatial slots | high | LLaVA-1.5 |
 | Dynamic tiling (Ch 6) | P·(1+hw) | very high | very high | InternVL, LLaVA-NeXT hi-res |
 
 Interview framing: *"The connector is where you decide what the image is allowed to
@@ -160,6 +160,26 @@ Ch 6 shows the full loop.
 **Check:** what breaks if you skip stage 1 and go straight to joint SFT? → *the
 LLM gets gradient noise from a misaligned image stream → capability regressions
 (catastrophic forgetting of pure-text behavior) and a much less stable start.*
+
+### Worked example: why did OCR get worse after compression?
+
+**Why:** a connector that scores well on scene summaries can still drop the
+single character that makes an OCR answer correct. An average score can hide it.
+
+**What:** suppose the ViT returns 576 patches. Compare a projector (576 decoder
+tokens), 2×2 pooling (144), and a 32-query resampler. At 128 KiB of KV per token
+([Chapter 9](ch09-inference-and-serving.md)), each image needs **72, 18, or 4 MiB**
+respectively. These are decoder KV costs, not total GPU memory. The ViT did the
+same work in all three cases; the resampler adds computation of its own.
+
+**How:** keep the encoder, image size, decoder, data and training budget fixed;
+train each bridge before comparing. Report exact-match OCR by character size,
+scene QA accuracy, and time to first token. Include images where changing a
+single digit changes the answer. If even the unpooled model fails, probe a
+higher-resolution crop with the same model as a diagnostic for upstream detail
+loss. If only the compressed model fails on the same features, test whether a
+larger token budget restores accuracy. Neither comparison alone proves the
+cause, but together they narrow down where to spend the next experiment.
 
 ## 5.11 ❓ Interview
 

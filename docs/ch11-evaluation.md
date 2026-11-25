@@ -99,8 +99,10 @@ both ways.*
 - **POPE:** binary QA — "Is there a {object} in the image?" over present/absent
   objects; report accuracy **separately** for the "Yes" and "No" splits (the
   "No" split is the honest number).
-- **CHAIR:** caption-based — fraction of captioned objects that don't exist
-  (or exist but were missed); catches type #1 in generation, not just QA.
+- **CHAIR:** caption-based. `CHAIR_i` is the fraction of mentioned object
+  instances that are hallucinated; `CHAIR_s` is the fraction of captions with
+  at least one hallucinated object. Neither measures omission; track recall
+  separately if missing objects matters.
 
 **Check:** POPE accuracy 92% overall but 84% on the "No" split — what's the story?
 → *the model says "yes" to things that aren't there (prior-driven #5/#1). Overall
@@ -170,6 +172,33 @@ MMMU — ship it? → *depends on the product: if the eval set *is* the product,
 (with the trade documented); if "general intelligence" is a requirement, no — you
 found a capability regression the product needs. The eval set should be the
 contract, not an afterthought.*
+
+### Worked example: did the model use the image or guess from the prompt?
+
+**Why:** a VLM can answer “yes” to “Is there a person at the crosswalk?” because
+the wording predicts the answer in training, not because it saw a person. A
+release comparison needs to distinguish that shortcut from genuine visual gains.
+
+**What:** build 100 matched pairs of clips for the *same* question, one with a
+clearly visible person in the crosswalk and one with a clearly empty crosswalk.
+Keep camera view and scene conditions similar, and review both labels. Suppose
+a model gets both answers right on 60 pairs, only the positive right on 30,
+only the negative right on 5, and neither right on 5. Its item accuracy is
+`(2×60 + 30 + 5) / 200 = 77.5%`. But paired accuracy is **60%**, positive
+recall is **90%**, and the false-positive rate is **35%**. The pooled score
+alone doesn't reveal that asymmetry. An always-yes baseline gets 50% item
+accuracy and 0% paired accuracy.
+
+**How:** compare candidate and baseline on the exact same examples with a frozen
+template, preprocessing, and output parser. Use a deterministic scorer for the
+binary answers; count abstentions separately and report the coverage rather than
+silently dropping them. Keep pairs intact when bootstrapping the candidate-minus-
+baseline metric; if clips come from the same drive, resample by independent drive
+or by a larger cluster that keeps related clips and pairs together. Report the
+false-positive rate and paired accuracy by condition (e.g., glare vs. clear
+daylight) with sample counts and uncertainty. Set release thresholds before
+seeing the results, and send visually ambiguous cases to human review instead
+of treating the judge as ground truth.
 
 ## 11.10 ❓ Interview
 

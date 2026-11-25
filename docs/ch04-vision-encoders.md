@@ -51,7 +51,7 @@ artifacts (the model's "where do I dump my weirdness") so they don't pollute the
 real patch tokens. Cheap, measurable win on dense feature quality. One-liner version:
 *registers = scratch space in the token stream.*
 
-## 4.5 Resolution is a dial you pay for linearly
+## 4.5 Resolution: pixels, patches, and cost
 
 ```
 224 px  → 16×16 = 256 tokens
@@ -59,32 +59,55 @@ real patch tokens. Cheap, measurable win on dense feature quality. One-liner ver
 448 px  → 32×32 = 1024 tokens
 ```
 
-More pixels → more tokens → more prefill FLOPs (attention is ~quadratic in n) and
-more KV memory. The "high-res VLM" war (Ch 6) is entirely about *which* pixels to
-trade for tokens.
+More pixels → more patches. With dense ViT attention, pairwise work grows
+quadratically in patch count. The decoder pays separately, based on how many
+tokens actually leave the connector ([Chapter 5](ch05-bridging-vision-to-language.md)).
 
 **Check:** doubling resolution multiplies token count by how much? → *4. Attention
-cost goes ~16× if you keep them all — that's why nobody naively just upscales.*
+pair count goes up 16× with full attention, but projections and FFNs grow only
+4×, so total encoder runtime need not grow 16×.*
+
+### Worked example: resize, tile, or crop?
+
+**Why:** a 14-pixel-tall digit in a 1344-pixel-wide image shrinks to about 3.5
+pixels when resized to 336 pixels wide. The resized image may no longer contain
+enough evidence to read it, no matter how large the decoder is.
+
+**What:** consider a square image, 14-pixel patches, and an encoder accepting
+336-pixel views. A global resize yields 576 patches. Four 672×672 tiles, each
+resized to 336×336, preserve about 7 pixels of digit height and yield 2,304
+patches before any global view. A 336×336 native-pixel crop around the digit
+preserves all 14 pixels with 576 patches, but loses context and needs a way to
+select the region. Patch size is not a hard readability threshold: a patch
+embedding processes the pixels inside it, but downsampling may erase them first.
+
+**How:** measure exact match on small text with global, tiled, and crop inputs.
+Try ground-truth crops first to estimate how much correct localization could
+help, then test the actual region selector and report misses and additional
+latency. Include examples with text near tile boundaries; run an overlap
+ablation before increasing resolution across the entire image.
 
 ## 4.6 2D positions: why "which patch is where" must be encoded
 
-Attention alone knows *order*, not *layout*. Patch #575 is "after" patch #574, but
-is it *below* it or *beside* it? Options:
+Unmasked attention without position information is permutation-equivariant: it
+doesn't know which patch came first. A 1D index adds order, but the same offset
+can mean different spatial relationships at different grid widths. Options:
 
 ```python
 # (a) learnable 2D grid embedding  (original ViT)
 pos = grid_embed[h, w]
-# (b) 2D RoPE  (Qwen2-VL): rotate q/k by (h·θh + w·θw) — relative 2D geometry
-# (c) mRoPE (Qwen2-VL video): (t, h, w) triples — time becomes a position axis
+# (b) 2D RoPE: allocate rotary channels to height and width separately
+# (c) M-RoPE (Qwen2-VL decoder): allocate channels to time, height, and width
 ```
 
-2D/3D RoPE is the frontier default because it's relative, doesn't need a table per
-resolution, and generalizes to **variable resolutions and video** (which learnable
-grids can't — a 16×16 table can't answer about a 20×30 tiling).
+Rotary positions can be computed for new grid sizes without resizing a learned
+table. Learned grids can also support another resolution by interpolating patch
+positions (keeping any class token separate). Neither scheme guarantees good
+accuracy at grid sizes never seen in training.
 
-**Check:** why does dynamic resolution *force* a 2D-aware position scheme? →
-*the grid shape changes per image; a fixed learned table can't cover it, but
-relative (h,w) encodings can.*
+**Check:** why prefer explicit row and column coordinates for variable grids? →
+*a vertical neighbor stays one row away whether the image grid is 16 or 32
+patches wide. A flattened index alone doesn't express that relationship.*
 
 ## 4.7 DINOv2: self-distillation, in six lines
 

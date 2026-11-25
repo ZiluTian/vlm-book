@@ -35,9 +35,9 @@ similarity matrix. That decoupling is what makes inference cheap (cache either s
 ## 3.3 Step 1 — build the similarity matrix
 
 ```python
-def similarities(img, txt):
+def similarities(img, txt, logit_scale):
     # img, txt: [B, D], both l2-normalized
-    return img @ txt.T / exp(self.logit_scale)      # [B, B]
+    return exp(logit_scale) * (img @ txt.T)         # [B, B]; scale = 1 / τ
 ```
 
 `sim[i, j]` = how well image *i* matches text *j*. Diagonal = the true pairs.
@@ -60,9 +60,9 @@ directions constrain the geometry.*
 
 ## 3.5 The temperature: the knob that makes web data usable
 
-Softmax sees `cos / τ`. With τ ≈ 0.07 the scale is ~14× — the model must be
-*confident* that the true caption beats 32k near-duplicate web captions. Without
-sharp temperature, random web noise flattens the softmax and gradients vanish.
+Softmax sees `cos / τ`. With τ ≈ 0.07 the scale is ~14×. Lower temperature
+concentrates the probability mass, so the highest-scoring negatives matter most.
+That includes mislabeled negatives; a sharper softmax does not fix noisy labels.
 
 **Check:** temperature is learned, not fixed. What would happen if it learned to
 *grow* without bound? → *softmax → uniform, loss → log(B), no signal. The data
@@ -79,42 +79,73 @@ to mine by hand, free from the dataloader. Consequences:
 - Bigger batches let you push temperature sharper (§3.5) — the two co-move.
 
 **Check:** 8 GPUs, 4096 batch each — is that 8×4096 negatives per example, or 4095?
-→ *8×4096 (with all-gather); only 4095 if you skip the gather (and train worse).*
+→ *32,767 with all-gather (the positive takes one slot); 4,095 without it.*
 
 ## 3.7 Where the softmax breaks (the setup for SigLIP)
 
 Push B toward 10⁶:
 - `sim` is O(B²) — memory blows up,
-- the softmax couples *every* pair to every other pair — one bad pair distorts all,
-- `cos/τ` overflows fp precision → softmax goes one-hot → **gradients die**.
+- in each direction, every candidate for a given anchor shares a denominator;
+  a high-scoring false negative steals mass from the positive.
 
-So "just use a bigger batch" hits a wall. The wall is in the *softmax*, not the data.
+Stable log-sum-exp avoids exponent overflow, and a tiled implementation need not
+store the full matrix. Neither removes the cost of scoring all pairs. SigLIP
+changes the normalization, not the number of pairs in a full all-pairs loss.
 
 **Check:** what property of softmax causes the coupling? → *its denominator is a
-sum over ALL pairs — each example's logit depends on every other example's logit.*
+sum over candidates for the same anchor — their probabilities are coupled even
+though their raw logits are computed independently.*
 
 ## 3.8 SigLIP: replace the coupling with a sigmoid
 
 Drop the softmax; make each pair an independent binary "match / not match":
 
 ```python
-def siglip_loss(img, txt, s=48.0, b=-10.0):
-    z = img @ txt.T * s + b                  # [B, B]
-    d = arange(B)
-    pos = -log_sigmoid(z[d, d]).mean()       # push true pairs  -> +inf
-    off = z.clone(); off[d, d] = 0
-    neg = -log_sigmoid(-off).sum() / off.numel()   # push other pairs -> -inf
-    return pos + neg
+def siglip_loss(img, txt, logit_scale, bias):
+    B = len(img)
+    z = exp(logit_scale) * (img @ txt.T) + bias  # [B, B]
+    signs = 2 * eye(B, device=z.device) - 1     # +1 diagonal, -1 off-diagonal
+    return softplus(-signs * z).sum() / B       # sum pairs, normalize by anchors
 ```
 
-Same purpose (align two towers), different math (sigmoid, per-pair, no coupling).
-Results: robust at huge/global batches, no all-gather of logits, and SigLIP-L at
-768 px beats CLIP at high resolution — which is why high-res VLMs increasingly
-start from SigLIP encoders.
+Same purpose (align two towers), different math (sigmoid, per-pair, no softmax
+denominator). You can sum losses over blocks of exchanged embeddings without
+materializing global logits. If you want global negatives, those embeddings still
+have to reach the devices that score their pairs.
 
 **Check:** one-line CLIP vs SigLIP for the interview. → *"CLIP is softmax contrastive
-— in-batch negatives, batch-coupled. SigLIP is sigmoid contrastive — independent
-per-pair objectives, scales to giant batches, better at high res."*
+— in-batch negatives, coupled per anchor. SigLIP is sigmoid contrastive —
+independent per-pair terms that can be computed block by block."*
+
+### Worked example: the hard negative that isn't negative
+
+**Why:** contrastive training can penalize good matches when the dataset assumes
+every image has exactly one valid caption.
+
+**What:** for one CLIP image, suppose its positive caption and a near-duplicate caption have
+logits `[4, 3]`. The row softmax gives probabilities `[0.731, 0.269]`; the
+cross-entropy gradient is `p - target = [-0.269, +0.269]`. Gradient descent raises
+the positive logit and lowers the other one. If both captions describe the image,
+the second update is wrong. Sharpening the distribution isn't a label fix, and
+switching to SigLIP still pushes a pair apart if its sign is `-1`.
+
+**How:** if both matches are verified, try a normalized soft target with mass `0.5` on
+each caption (and zero on genuine negatives), or label both pairs `+1` for
+SigLIP. For uncertain duplicates, masking those pairs is safer than assuming
+equivalence: two almost-identical product images can show different model numbers.
+Evaluate recall@K with **all** verified matches accepted, and keep a separate
+slice for visually similar pairs that really are different. Otherwise you cannot
+tell whether the fix recovered valid matches or just blurred distinctions.
+
+**Distributed sanity test:** with two ranks and `b` examples per rank, rank 1's
+local image row `i` has positive text column `b + i` if the gather is rank-ordered.
+Compare the distributed loss **and both towers' gradients** against a single-device
+run on the same global batch. A detached gather can preserve the forward values
+while silently dropping the gradient contributions from remote anchors unless the
+implementation accounts for them separately.
+
+Sources: [CLIP](https://arxiv.org/abs/2103.00020),
+[SigLIP](https://arxiv.org/abs/2303.15343).
 
 ## 3.9 Zero-shot classification (the famous result)
 

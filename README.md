@@ -7,8 +7,9 @@ A bite-size, pseudocode-driven book on **Vision-Language Models** for experience
 CV engineers — CNNs, two-stream fusion, BEV perception, deployment — preparing for
 technical interviews on frontier multimodal systems.
 
-Every core concept comes with pseudocode (Python/PyTorch-flavored, shapes
-annotated), the *why* behind each piece, and a one-line comprehension **Check**.
+Core concepts come with shape-annotated pseudocode and a comprehension **Check**.
+Worked examples follow **Why → What → How**: the engineering problem, the
+mechanism with concrete numbers, and a test that shows whether it works.
 Each chapter ends with an **Interview** question bank. A chapter's **🎯** one-liner
 is the sentence you must be able to say out loud.
 

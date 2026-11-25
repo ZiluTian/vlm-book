@@ -37,11 +37,13 @@ Freeze `W` [d×k]. Add a low-rank bypass `B·A` (B: [d×r], A: [r×k], r ≪ min
 
 ```python
 def lora_linear(x, W, A, B, alpha, drop):
-    return x @ W.T + (alpha / r) * (drop(x @ A.T)) @ B.T
+    r = A.shape[0]
+    return x @ W.T + (alpha / r) * ((drop(x) @ A.T) @ B.T)
 # trained: A (init N(0, 0.02²)), B (init 0)  →  delta = 0 at step 0 (safe start)
 ```
 
-- New params: `2·r·d` per matrix vs `d·k` for full. r=64, d=k=4096 → 0.8% of the matrix.
+- New params: `r·(d+k)` per matrix vs `d·k` for full. With r=64 and d=k=4096,
+  that's 524,288 parameters, or 3.125% of this matrix (not of the whole model).
 - Applied to q,k,v,o (and often gate/up/down) of selected layers.
 - **Merge at deploy:** `W ← W + (α/r)·B·A` → zero inference overhead. This is the
   line that makes LoRA a *training* technique, not a *serving* one.
@@ -59,22 +61,42 @@ model == base model; no capability cliff before training kicks in.*
   quality. LoRA wins on memory, speed, and *keeping many adapters* (one base,
   N LoRAs for N domains — hot-swappable at serving time).
 
-**Check:** 7B model, full FT vs LoRA r=64 on A100s: what's the memory story?
-→ *full FT ≈ weights + grads + optimizer states ≈ 4×16 GB×… (fp32 moments) —
-hundreds of GB; LoRA trains ~0.1–1% of params → fits on 1–2 GPUs. That's the whole pitch.*
+### Worked example: what LoRA saves, and what it doesn't
+
+**Why:** fewer trainable parameters do not guarantee a long multimodal batch
+fits. The frozen backbone still runs, and gradients must pass through it to the
+adapters and any trainable projector.
+
+**What:** assume 7B parameters, BF16 weights and gradients, FP32 Adam moments,
+and no FP32 master weights. Full fine-tuning needs `7B × (2 + 2 + 8) = 84 GB`
+for model state before activations and temporary buffers. With 20M adapter
+parameters, LoRA instead needs `14 GB + 20M × 12 bytes ≈ 14.24 GB` under the
+same assumptions. If you double the number of image tokens, those model-state
+numbers stay the same, but saved activations and attention work still grow.
+
+**How:** count the parameters that actually require gradients, including the
+connector, and profile peak allocation on a batch near your real token cap.
+If peak usage grows mainly with image and text sequence length, try activation
+checkpointing or a smaller microbatch before reducing LoRA rank. If the frozen
+weights dominate even on short batches, quantizing or sharding the backbone
+addresses a different part of the budget. Compare task accuracy and text-only
+regressions at equal data exposure before choosing a configuration.
 
 ## 7.4 QLoRA: quantize the base, train the adapter
 
 ```
-base W  ──► 4-bit NF4 quantization (+double quant of the scales, paged optimizer)
-adapter ──► LoRA in bf16, applied to the *dequantized* activations
-memory  ──► 65B model fine-tuned in ~24 GB (one A100/H100)
+base W  ──► frozen 4-bit NF4 weights, dequantized in blocks for compute
+adapter ──► trainable LoRA branch operating on higher-precision activations
+memory  ──► 65B fine-tuning demonstrated on one 48 GB GPU in the QLoRA paper
 ```
 
 The base is frozen at 4-bit; only the bf16 adapter trains. Quality ≈ full-FT for
 many SFT tasks at a fraction of the memory. NF4 (normal Float 4) is a
 quantization that respects the parameter distribution (most weights are
 ~normal) — the detail that makes 4-bit work without a quality collapse.
+The [QLoRA paper](https://arxiv.org/abs/2305.14314) also quantizes the scales
+and uses paged optimizers to handle memory spikes; 4 bits per base parameter
+alone is not a peak training memory estimate.
 
 **Check:** where does QLoRA's quality actually come from, given 4-bit weights?
 → *the gradients never touch the base — only the bf16 adapter is optimized;

@@ -1,9 +1,8 @@
 # Chapter 6 — LLaVA: The Blueprint, Built in Stages
 
-> 🎯 **The one sentence:** LLaVA = frozen ViT + frozen LLM + a tiny trained projector,
-> where image features are prepended to the text sequence as "vision tokens" and only
-> the assistant's reply tokens are supervised. Build that forward pass below, one
-> stage at a time — it's the mental model for *every* encoder-connector VLM.
+> 🎯 **The one sentence:** LLaVA learns to insert projected vision features into a
+> decoder's text sequence, first aligning the bridge with frozen backbones, then
+> tuning the bridge and LLM to generate assistant replies conditioned on the image.
 
 ## 6.1 The three components, and who moves
 
@@ -11,11 +10,11 @@
 [ViT-L, frozen] ──► [projector, TRAINED] ──► [LLaMA-7B, frozen in stage 1]
 ```
 
-LLaVA v1: linear projector, 595k image–text pairs, stage 1 only.
-LLaVA v1.5: MLP projector, two stages, instruction data → this is the reference.
+Both original LLaVA and LLaVA-1.5 use alignment followed by instruction tuning.
+The original uses a linear projector; LLaVA-1.5 uses an MLP and a 336-pixel encoder.
 
-**Check:** which component holds the most parameters? → *the LLM. The projector is
-~0.1% of the model — that's the whole design bet: tiny bridge, frozen giants.*
+**Check:** which component holds the most parameters? → *the LLM. In stage 1
+only the much smaller projector trains, although both backbones still run.*
 
 ## 6.2 Step 0 — the text-only forward pass (recap)
 
@@ -40,11 +39,11 @@ feat = vit(image)           # image: [3, 336, 336] → feat: [576, 1024]
 ## 6.4 Step 2 — project into LLM space
 
 ```python
-v = projector(feat)         # [576, 1024] → [576, 3584]   (MLP in LLaVA-1.5)
-v = v * 100                 # LLaVA's scale: match text-embedding norms (§5.2)
+v = projector(feat)         # [576, 1024] → [576, D]   (MLP in LLaVA-1.5)
 ```
 
-Now `v` is a bag of 576 vectors that *look like* the LLM's own embedded tokens.
+Now `v` is an ordered sequence of 576 vectors with the same width as text
+embeddings. The projector learns to make those vectors useful to the LLM.
 
 ## 6.5 Step 3 — assemble the sequence
 
@@ -53,10 +52,10 @@ e_q = embed(question_ids)           # [Lq, D]
 seq = cat([v, e_q], dim=0)          # [576 + Lq, D]
 ```
 
-The image goes **first**, then the question. Positions: RoPE assigns 0,1,2,… over
-the whole sequence (Qwen2-VL instead gives the image tokens 2D (h,w) positions —
-Ch 4 §4.6). The model never sees a boundary marker; it just sees 576 tokens that
-"mean something" followed by text.
+In this simplified layout the image goes first, and RoPE uses 1D positions
+throughout the sequence. In a real chat, insert the features where the template
+places the image placeholder; some architectures also emit explicit boundaries.
+Qwen2-VL uses separate position axes for time, height, and width.
 
 **Check:** could the image go *after* the question? → *yes, and some templates do;
 causal attention means the answer (generated after both) can attend to either.
@@ -66,7 +65,7 @@ Front placement is convention + cache-friendly (image KV built once, reused).*
 
 ```python
 def llava_train(image, question_ids, answer_ids):
-    v = scale(projector(vit(image)))              # [P, D]
+    v = projector(vit(image))                     # [P, D]
     h = cat([v, embed(question_ids), embed(answer_ids)])   # [P + Lq + La, D]
     logits = gpt(h)                               # [P+Lq+La, V]
 
@@ -82,19 +81,49 @@ tokens and question tokens are *context*; only the answer is *supervised*.
 
 ## 6.7 Why the image tokens are never targets
 
-If you supervised them, the model would be trained to *predict image vectors from
-the previous image vector* — i.e., to hallucinate images as "text." They carry
-information *into* the sequence; they are not the model's output. Mask = 0.
-(One-liner for the interview: "we condition on the image, we don't generate it.")
+The language head predicts a distribution over vocabulary IDs, and projected
+image vectors have no vocabulary IDs. Ignore them as **targets**, but keep them
+visible to later tokens in the **attention mask**. Answer loss can still train
+the projector through that attention path.
 
-**Check:** in a chat model, which tokens get loss weight 1? → *only the assistant's
-reply tokens, after the last user turn (and system prompts are masked too).*
+**Check:** in this assistant-only recipe, which tokens get loss weight 1? → *the
+selected assistant response spans (often all assistant turns, plus any stop tokens
+the template intentionally supervises); user and system prompts are masked.*
+
+### Worked example: trace the first supervised token
+
+**Why:** after expanding an image placeholder, the input can have the right shape
+while the labels are shifted by hundreds of positions. The loss may still fall
+even though the model never learns the intended image–answer association.
+
+**What:** replace one placeholder with two visual embeddings. With simplified
+role markers and single-token answer `red`, the post-expansion layout is:
+
+| Position | Decoder input | Label at this position | Logit predicts a supervised target? |
+|---:|---|---|---|
+| 0 | `BOS` | ignore | no |
+| 1 | visual embedding 0 | ignore | no |
+| 2 | visual embedding 1 | ignore | no |
+| 3 | user question token | ignore | no |
+| 4 | `<assistant>` | ignore | yes → `red` |
+| 5 | `red` | `red` | yes → `EOS` |
+| 6 | `EOS` | `EOS` | no |
+
+**How:** expand an ignore label alongside every inserted visual vector and shift
+exactly once. If the model API shifts internally when given `labels`, pass the
+unshifted column above; if you compute cross-entropy yourself, pair `logits[:-1]`
+with `labels[1:]`. Inspect one real collated batch: after padding/truncation,
+embedding lengths and label lengths must match, padding and vision labels must
+be ignored, and at least one assistant target must remain per example used for
+training. In a microbatch test, verify that a frozen LLM accumulates no parameter
+gradients but the projector receives a nonzero gradient. Freezing the LLM's
+parameters is not the same as wrapping its forward pass in `no_grad()`.
 
 ## 6.8 Inference — the loop, with an image
 
 ```python
 def llava_infer(image, prompt_ids):
-    v = scale(projector(vit(image)))             # [P, D]
+    v = projector(vit(image))                    # [P, D]
     h = cat([v, embed(prompt_ids)])              # prefill input
     cache = new_caches()
     logits = gpt(h, cache)                       # one prefill over P + L tokens
@@ -107,17 +136,17 @@ def llava_infer(image, prompt_ids):
     return detokenize(toks)
 ```
 
-Notice the economics: the image costs **one** expensive prefill; every decoded token
-after that just reads the cached image KV. Longer answers are *cheap* relative to
-the image — the opposite of a CNN where you'd re-run the backbone per query.
+The image is encoded and prefetched into decoder KV once per prefill. Each decode
+step still reads the retained visual KV and computes decoder output for the new
+token. A long answer can dominate end-to-end latency even with perfect KV reuse.
 
 **Check:** two questions, same image, same process: how many ViT runs? → *two,
 unless you cache the vision tokens — a standard serving optimization (Ch 9).*
 
-## 6.9 Training stage 1 — align the spaces (train ~0.1% of the model)
+## 6.9 Training stage 1 — align the spaces without updating the backbones
 
 ```python
-# data: 595k (image, caption) pairs, captions from web/GPT-4
+# data: image-caption pairs (about 558k for LLaVA-1.5)
 for image, caption in batch:
     h = cat([projector(vit(image)), embed(caption)])
     # supervise ONLY the caption tokens:
@@ -136,8 +165,7 @@ pre-aligned bridge.*
 ## 6.10 Training stage 2 — instruction tuning
 
 ```python
-# data: ~150k multi-turn conversations (GPT-4-generated: QA, complex reasoning,
-#       dialogue, grounding) — see §6.11
+# data: image-grounded instructions, including synthetic and existing task data
 # now: projector + LLM (LoRA or full) both update
 for (image, turns) in batch:
     h = build_chat_seq(image, turns)             # §6.12 template
@@ -155,19 +183,22 @@ text-capability bleed.*
 ## 6.11 The data engine (where LLaVA actually won)
 
 The architecture was simple; the *data* was the move:
-- GPT-4 looked at CC3M images and wrote (a) detailed captions, (b) complex
-  Q&A (multi-step, compositional), (c) multi-turn conversations.
-- ~665k instruction samples total; quality bar: "would a human ask this?"
-- No pixel-level labels, no boxes — the model learns to *describe and reason*,
-  grounding emerges from the text.
+- The original [LLaVA](https://arxiv.org/abs/2304.08485) used text-only GPT-4 with
+  COCO captions and bounding-box descriptions to write conversations, detailed
+  descriptions, and reasoning questions; GPT-4 was not shown the source pixels.
+- The original release used roughly 158k generated instruction examples.
+  [LLaVA-1.5](https://arxiv.org/abs/2310.03744) used roughly 665k examples in an
+  expanded mix that also included existing task datasets.
+- A synthetic teacher cannot verify details absent from its inputs. Audit labels
+  against pixels before treating them as evidence of fine visual grounding.
 
 🔗 **BEV bridge:** this is your auto-labeling pipeline, upgraded: instead of
 labeling boxes, you label *behavior and reasoning* — and the labels are in a format
 any LLM can consume. Data engine > architecture is the pattern everywhere in 2024–26.
 
-**Check:** why did GPT-4-written data beat more, human-annotated data? → *scale of
-diversity: 665k varied instruction types, cheap; human annotation at that breadth
-is cost-prohibitive. Quality control via prompt design + filtering.*
+**Check:** what is a likely failure if the teacher only sees captions? → *it may
+write a plausible answer about a detail that the captions never established.
+Verify the claim against the image, not against the teacher's fluency.*
 
 ## 6.12 Chat templates and multi-image
 
@@ -203,11 +234,11 @@ def any_res_tokens(image, vit):
     return cat([global_feats] + tile_feats)          # 576*(1 + h*w) tokens
 ```
 
-2×2 grid → 576×5 = 2880 tokens. The LLM sees a low-res overview *plus*
-high-res local detail — like a FPN with explicit token budgets per level.
-InternVL does the same family of trick with a bigger ViT. (And the no-pooling
-dynamic-resolution camp — Qwen2-VL — does it by simply running the ViT at native
-size. §5.8.)
+2×2 grid → 576×5 = 2880 tokens in this simplified accounting. Actual
+LLaVA-NeXT packing can rearrange tile features into a spatial grid, remove padded
+regions and add row separators. Count tokens after packing for the checkpoint
+you serve. Qwen2-VL instead uses dynamic-resolution preprocessing and a learned
+patch merger ([Chapter 5](ch05-bridging-vision-to-language.md)).
 
 **Check:** 2880 vision tokens + 2k text, what do you hit first? → *context window
 and KV memory (Ch 9) — the reason token *pruning* at inference exists (Ch 8).*
@@ -216,7 +247,7 @@ and KV memory (Ch 9) — the reason token *pruning* at inference exists (Ch 8).*
 
 | Symptom | First suspect |
 |---|---|
-| Answers ignore the image ("plausible but generic") | connector under-aligned (stage 1 undertrained, wrong scale §5.2) |
+| Answers ignore the image ("plausible but generic") | verify image insertion, assistant targets and projector gradients before changing the training recipe |
 | Text-only capability regressed | stage 2 LR/epochs too hot; mask leaking onto context |
 | Bad at small text/objects | resolution or pooling (§6.13, §5.7) |
 | Inconsistent spatial answers ("left/right" flips) | position encoding too weak (plain 1D RoPE on image tokens) |
@@ -239,7 +270,7 @@ token, (c) 2D position schemes attach to it. Back-placement also works; it's a
 template detail, not physics.
 
 **Q: What's the token cost of a LLaVA-NeXT 2×2 image, and how do you manage it?**
-— 576 global + 4×576 tiles = 2880. Manage: adaptive grid by aspect ratio, cap
+— 576 global + 4×576 tiles = 2880 before any unpadding and separators. Manage: adaptive grid by aspect ratio, cap
 total tokens, pool 2×2 within tiles if the LLM is small, or prune low-attention
 vision tokens at inference (§8.3).
 
