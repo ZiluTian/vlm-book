@@ -38,19 +38,39 @@ the two encoders don't automatically represent information in the same space.
 
 ```python
 class ClipModel:
-    def __init__(self, D):
-        self.vit   = ViT(patch=14, depth=12, D=768)      # image tower
-        self.xfmr  = TextTransformer(depth=12, D=512)    # text tower
-        self.img_proj = Linear(768, D)                   # common output width D
-        self.txt_proj = Linear(512, D)
+    def __init__(self, D_shared):
+        self.vit   = ViT(patch=14, depth=12, D=768)      # D here is image hidden width
+        self.xfmr  = TextTransformer(depth=12, D=512)   # D here is text hidden width
+        self.img_proj = Linear(768, D_shared)
+        self.txt_proj = Linear(512, D_shared)
         self.logit_scale = param(init=log(1/0.07))       # learned temperature
 
     def img_vec(self, x):   # x: [B, 3, 224, 224]
-        return l2_norm(self.img_proj(self.vit(x).pool))  # [B, D]
+        return l2_norm(self.img_proj(self.vit(x).pool))  # [B, D_shared]
 
     def txt_vec(self, t):   # t: [B, L] token ids
-        return l2_norm(self.txt_proj(self.xfmr(t).pool)) # [B, D]
+        return l2_norm(self.txt_proj(self.xfmr(t).pool)) # [B, D_shared]
 ```
+
+**How to read the numbers:** `depth=12` means 12 Transformer blocks in each
+tower, not 12 tokens or 12 coordinates. The blocks don't have to match in
+number across towers. The `D` argument *inside* each encoder is its hidden
+width: each image token carries 768 numbers, and each text token carries 512.
+`D_shared` is a separate setting used only after pooling, called `D` in the
+similarity formula. These are illustrative architecture settings, not a
+specification for every CLIP checkpoint.
+
+| Stage | Dog photo | “A dog on grass” |
+|---|---|---|
+| Input tokens | `patch=14` divides a 224×224 image into a 16×16 grid: 256 patch tokens, plus a class token in this ViT | Tokenizer produces `L` positions, including any special tokens and padding |
+| After 12 blocks | `[257, 768]`: one 768-number vector per token | `[L, 512]`: one 512-number vector per token |
+| Pool one vector | `[768]`: take the final class-token vector | `[512]`: take the final end-of-text token vector in CLIP |
+| Project and normalize | `Linear(768, 4)` → `[4]` | `Linear(512, 4)` → `[4]` |
+
+The last row uses `D_shared=4` for the toy example below. Do this for all
+three pairs and you get two `[3, 4]` embedding arrays. Multiplying one by the
+other's transpose gives a `[3, 3]` matrix: **four coordinates go into each dot
+product, but there are three images and three captions to score.**
 
 Note: the towers **never exchange activations**. They meet exactly once, at the
 similarity matrix. That decoupling is what makes inference cheap (cache either side).
