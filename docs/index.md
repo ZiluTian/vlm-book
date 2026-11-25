@@ -22,17 +22,17 @@ hide:
 <div class="plates" markdown="1">
 
 - **I · Foundations**  
-  [How does a decoder see a patch?](ch05-bridging-vision-to-language.md)  
-  Compare a projector that keeps every patch with queries that compress a whole frame.
+  [How does a decoder see a patch?](ch01-the-landscape.md)<br>
+  Start at Chapter 1 and trace an image from the vision encoder to the decoder. For the projector and compression tradeoffs, jump to [Chapter 5: The connector](ch05-bridging-vision-to-language.md).
 - **II · The blueprint**  
   [Build the forward pass](ch06-llava-the-blueprint.md)  
-  Follow one image and one question all the way to the first supervised token.
+  Start at Chapter 6 and follow one image and one question all the way to the first supervised token.
 - **III · Production**  
   [Price a high-resolution image](ch09-inference-and-serving.md)  
-  Count its tokens twice: once for prefill, then for the cache that stays resident.
+  Start at Chapter 9 and count the image's tokens twice: once for prefill, then for the cache that stays resident.
 - **IV · Interview studio**  
   [Take the whiteboard round](ch12-interview-playbook.md)  
-  Size a cache, defend a connector, and design a fleet-data pipeline.
+  Start at Chapter 12: size a cache, defend a connector, and design a fleet-data pipeline.
 
 </div>
 
