@@ -10,6 +10,11 @@
 Just `(image, "some alt text")`. The whole trick of CLIP is that **this noisy,
 label-free data is enough** — if you pick the right loss.
 
+**Running example:** take a batch of three pairs, in this order: a dog photo
+with “A dog on grass,” a train photo with “A train at a station,” and a coffee
+photo with “A cup of coffee.” The loader supplies those three matches. It
+doesn't supply class IDs or any explicit wrong answers.
+
 **Check:** what's the one thing this dataset has that ImageNet doesn't? →
 *open-vocabulary semantics — the model learns "text space," not a fixed label set.*
 
@@ -20,17 +25,32 @@ class ClipModel:
     def __init__(self):
         self.vit   = ViT(patch=14, depth=12, D=768)      # image tower
         self.xfmr  = TextTransformer(depth=12, D=512)    # text tower
+        self.img_proj = Linear(768, D)                   # common output width D
+        self.txt_proj = Linear(512, D)
         self.logit_scale = param(init=log(1/0.07))       # learned temperature
 
     def img_vec(self, x):   # x: [B, 3, 224, 224]
-        return l2_norm(self.vit(x).pool)                 # [B, D]
+        return l2_norm(self.img_proj(self.vit(x).pool))  # [B, D]
 
     def txt_vec(self, t):   # t: [B, L] token ids
-        return l2_norm(self.xfmr(t).pool)               # [B, D]
+        return l2_norm(self.txt_proj(self.xfmr(t).pool)) # [B, D]
 ```
 
 Note: the towers **never exchange activations**. They meet exactly once, at the
 similarity matrix. That decoupling is what makes inference cheap (cache either side).
+
+**What comes out for our batch?** One vector per photo and one per caption.
+Imagine both towers project to `D = 4` instead of a real model's hundreds of
+dimensions. Here are invented unit vectors chosen to make the dot products easy:
+
+| Pair | Image embedding | Caption embedding |
+|---|---|---|
+| Dog | `[1, 0, 0, 0]` | `[0.8, 0, 0.2, √0.32]` |
+| Train | `[0, 1, 0, 0]` | `[0.2, 0.7, 0, √0.47]` |
+| Coffee | `[0, 0, 1, 0]` | `[0, 0.1, 0.9, √0.18]` |
+
+Both embedding arrays have shape `[3, 4]`. The fourth caption coordinate makes
+each caption vector unit length; the image vectors happen to be zero there.
 
 ## 3.3 Step 1 — build the similarity matrix
 
@@ -42,6 +62,23 @@ def similarities(img, txt, logit_scale):
 
 `sim[i, j]` = how well image *i* matches text *j*. The diagonal contains the
 original image–caption pairs; the off-diagonal entries are the cross-pairs.
+
+**How to build it:** multiply `[3, 4] @ [4, 3]` to score all nine pairs. For
+example, the dog image vector `[1, 0, 0, 0]` selects the first coordinate of
+each caption vector, so its dot products are `[0.8, 0.2, 0.0]`. Because the
+vectors have unit length, these dot products are also cosine similarities.
+Use a toy scale `exp(logit_scale) = 5` (temperature `τ = 0.2`) to turn the
+cosines into the logits that go into the loss:
+
+| Image ↓ / Caption → | Dog caption | Train caption | Coffee caption |
+|---|---:|---:|---:|
+| Dog photo | 0.80 × 5 = **4.0** | 0.20 × 5 = 1.0 | 0.00 × 5 = 0.0 |
+| Train photo | 0.00 × 5 = 0.0 | 0.70 × 5 = **3.5** | 0.10 × 5 = 0.5 |
+| Coffee photo | 0.20 × 5 = 1.0 | 0.00 × 5 = 0.0 | 0.90 × 5 = **4.5** |
+
+The bold cells are the designated matches **because of the input pairing**, not
+because they're the largest scores. Early in training, the largest score can
+land in the wrong cell; that's what the loss is there to fix.
 
 ## 3.4 Step 2 — the loss: the batch is the negative set
 
@@ -74,6 +111,18 @@ def clip_loss(sim):
     return (loss_i2t + loss_t2i) / 2
 ```
 
+### Follow the numbers through the loss
+
+1. **Image → text:** read the dog photo's **row** `[4, 1, 0]`. Softmax gives
+   `[0.936, 0.047, 0.017]`. The dog caption is the target, so the loss is
+   `−log(exp(4) / (exp(4) + exp(1) + exp(0))) ≈ 0.066`.
+2. **Text → image:** read the dog caption's **column** `[4, 0, 1]`. The strongest
+   distractor is now the coffee *photo*, not the train *caption*. Here the dog
+   still has probability `0.936` because the competing scores just swap places.
+3. **Average:** the three row losses are about `[0.066, 0.077, 0.040]` and the
+   three column losses are about `[0.066, 0.106, 0.029]`. The two means are
+   `0.0611` and `0.0671`, so the final batch loss is **`0.0641`**.
+
 The catch: **negative means assumed not to match, not verified wrong.** If the
 batch contains two dog photos, “A dog on grass” might describe both, even though
 standard CLIP treats it as positive for only one. The other match is a *false
@@ -85,23 +134,32 @@ losses train both retrieval directions.*
 
 ## 3.5 The temperature: the knob that makes web data usable
 
-Softmax sees `cos / τ`. With τ ≈ 0.07 the scale is ~14×. Lower temperature
+Softmax sees `cos / τ`. CLIP initializes `τ` to `0.07`, giving a scale of ~14×. Lower temperature
 concentrates the probability mass, so the highest-scoring negatives matter most.
 That includes mislabeled negatives; a sharper softmax does not fix noisy labels.
 
-**Check:** temperature is learned, not fixed. What would happen if it learned to
-*grow* without bound? → *softmax → uniform, loss → log(B), no signal. The data
-implicitly caps it: a sharper τ only helps if the model can actually tell the pair
-apart.*
+**Same dog photo, different temperature:** halving `τ` from `0.2` to `0.1`
+doubles the row logits from `[4, 1, 0]` to `[8, 2, 0]`. The dog caption's
+probability rises from `93.6%` to `99.7%`, but the ranking hasn't changed.
+If the wrong caption ranked first, lowering `τ` would make that mistake more
+confident, not correct it.
+
+**Check:** what happens as `τ` grows without bound? → *the logits approach zero,
+softmax approaches uniform, and the loss approaches `log(B)`. The gradient to
+the cosine scores shrinks because it is multiplied by `1/τ`.*
 
 ## 3.6 Why batch size is *the* hyperparameter
 
-Batch B gives B−1 negatives per example. B = 32k means 32k negatives — impossible
-to mine by hand, free from the dataloader. Consequences:
-- CLIP training is **batch-obsessed**: bigger batch → better negatives → better model.
+Our three-pair batch gives the dog photo two negative captions. Add a fourth
+pair (say, a bicycle and its caption) and the matrix grows from `3 × 3` to
+`4 × 4`. The dog now has three negatives, even though we didn't relabel it.
+In general, `B` pairs give `B−1` negatives per anchor. Consequences:
+- Bigger batches give more chances to see useful hard negatives, but also more
+  chances to see false negatives.
 - Each GPU sees a *slice* of the batch; the loss needs an **all-gather of
   embeddings** across GPUs to see all negatives (that's the "global in-batch" trick).
-- Bigger batches let you push temperature sharper (§3.5) — the two co-move.
+- The added negatives affect the softmax according to their scores. A single
+  near-match can matter more than many unrelated captions.
 
 **Check:** 8 GPUs, 4096 batch each — is that 8×4096 negatives per example, or 4095?
 → *32,767 with all-gather (the positive takes one slot); 4,095 without it.*
@@ -133,6 +191,13 @@ def siglip_loss(img, txt, logit_scale, bias):
     return softplus(-signs * z).sum() / B       # sum pairs, normalize by anchors
 ```
 
+**Same scores, different loss:** for illustration, use scale `5` again and a
+bias of `−2`. The dog photo's logits become `[2, −1, −2]`, and the pair labels
+are `[+1, −1, −1]`. The sigmoid match scores are `[0.881, 0.269, 0.119]`.
+They don't have to add to one: each caption gets its own match score. Adding
+the bicycle caption introduces a fourth loss term but doesn't renormalize
+these three scores. CLIP's row softmax would change their probabilities.
+
 Same purpose (align two towers), different math (sigmoid, per-pair, no softmax
 denominator). You can sum losses over blocks of exchanged embeddings without
 materializing global logits. If you want global negatives, those embeddings still
@@ -147,10 +212,11 @@ independent per-pair terms that can be computed block by block."*
 **Why:** contrastive training can penalize good matches when the dataset assumes
 every image has exactly one valid caption.
 
-**What:** for one CLIP image, suppose its positive caption and a near-duplicate caption have
-logits `[4, 3]`. The row softmax gives probabilities `[0.731, 0.269]`; the
-cross-entropy gradient is `p - target = [-0.269, +0.269]`. Gradient descent raises
-the positive logit and lowers the other one. If both captions describe the image,
+**What:** replace the train pair with a second dog photo captioned “A dog sitting
+on grass.” Suppose the first dog photo's row is now `[4, 3, 0]`. Softmax gives
+about `[0.721, 0.265, 0.013]`; subtract the target `[1, 0, 0]` to get the row
+loss gradient `[-0.279, +0.265, +0.013]`. This loss pushes the designated
+positive score up and the second caption's score down. If both captions describe the image,
 the second update is wrong. Sharpening the distribution isn't a label fix, and
 switching to SigLIP still pushes a pair apart if its sign is `-1`.
 
@@ -177,19 +243,26 @@ Sources: [CLIP](https://arxiv.org/abs/2103.00020),
 CLIP never saw class labels. To classify an image into C classes:
 
 ```python
-def zero_shot(img, class_names, templates):
-    x = l2_norm(vit_pool(img))                          # [D]
+def zero_shot(model, img, class_names, templates):
+    x = model.img_vec(img[None])[0]                     # [D]
     cls_embs = []
     for c in class_names:
-        t = [t.format(c) for t in templates]           # "a photo of a {c}", "an image of {c}", ...
-        e = mean([l2_norm(txt_embed(t)) for t in t])
+        prompts = [t.format(c) for t in templates]
+        e = model.txt_vec(tokenize(prompts)).mean(dim=0)
         cls_embs.append(l2_norm(e))
-    logits = x @ stack(cls_embs).T * tau_val           # [C]
-    return argmax(softmax(logits))
+    logits = exp(model.logit_scale) * (x @ stack(cls_embs).T)  # [C]
+    return class_names[argmax(logits)]
 ```
 
 The model "knows" class `c` only because English text describing `c` exists.
 Swap the class list → new task, no retraining.
+
+**Same matrix operation at inference:** treat the three example captions as
+one prompt each for the classes `dog`, `train`, and `coffee`. A query with the
+toy dog embedding gets logits `[4, 1, 0]`, so `argmax` returns `dog`. There's
+no batch of reference photos and no training loss: the three columns now
+represent the answer choices you supply at inference. To classify a new set
+of classes, embed those prompts and replace the columns.
 
 **Check:** where does the class prior live? → *in the text tower's embeddings —
 change the templates, change the classifier.*
@@ -199,8 +272,9 @@ change the templates, change the classifier.*
 1. **Prompt ensembles:** average embeddings over ~10–200 template variants
    ("a photo of a {c}", "a blurry image of {c}", ...) → +3–5 points. Templates are
    a (cheap) hyperparameter, not a formality.
-2. **Temperature calibration:** the published τ (0.07) is tuned on a web val set;
-   on *your* domain, refit τ on a small val split. Often worth a point, costs nothing.
+2. **Temperature calibration:** if you need calibrated probabilities, fit a
+   temperature on held-out target-domain data. It can improve confidence
+   estimates, but a positive scale alone cannot change the top-1 prediction.
 
 **Check:** a domain where both matter more than on ImageNet? → *anything with
 idiosyncratic language: medical, satellite, dashcam ("ODD violation" was never
@@ -227,10 +301,9 @@ Keep this list — it's the "why does the stack exist" cheat sheet.
   marginal gain at CLIP scale.
 
 **Q: How does temperature interact with batch size?**
-— Effective sharpness scales with `s·B`: more negatives lets you afford a sharper
-  temperature. Scale B without s and the softmax flattens; scale s without B and
-  you overfit to in-batch noise. They're tuned together — and this tension is
-  exactly what SigLIP dissolves.
+— More negatives add terms to the softmax denominator; lower temperature
+   concentrates mass on the largest logits. The effect depends on how closely
+   the new negatives score to the positive, not just on the batch size.
 
 **Q: Why L2-normalize the embeddings?**
 — Similarity becomes pure cosine (geometry, not scale); logits stay bounded so the
