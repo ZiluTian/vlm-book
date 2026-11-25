@@ -50,29 +50,48 @@ learning NLP" — you're a *perception person who now owns the interface to lang
 ## 12.3 Math questions (do these *out loud*, show the steps)
 
 **M1. KV memory for a 70B (80 layers, 8 kv heads, head_dim 128, fp16) at 32k context.**
-→ 2·80·8·128·2 = 320 KB/token → ×32k = **10 GB/user**. Then: "so int8 KV halves it,
-context cap to 16k halves it, prefix-sharing makes the system-prompt part free."
+→ 2·80·8·128·2 = 320 KiB/token → ×32,768 = **10 GiB/user**. Int8 KV roughly
+halves the cache; exact prefix sharing stores a shared prefix once, not zero times.
 
 **M2. Decode tok/s ceiling for 7B-int4 on an H100, 1 user, 8k context (GQA-8).**
 → bytes/token ≈ weights 4 GB + KV 8k×128 KB ≈ 1 GB → ~5 GB; ÷ 3 TB/s ≈ **~600 tok/s
 theoretical**, real ~150–250 (engine overhead). Note the KV term *grows with context*.
 
 **M3. Cost: 100k captions/day, 1k vision + 200 text tokens in, 100 out, 7B-GQA int4, 4×H100.**
-→ tokens/day ≈ 100k×1300 ≈ 1.3×10⁸; 4 H100 @ ~2k tok/s combined (realistic, batched)
-≈ 6.9×10⁸ tok/day capacity → ~44% utilization → $/day ≈ 4×$3×24 ≈ $288 →
-**~$2.2 / 1M tokens** (incl. idle). Compare API: 10–50× that. (Structure > precision.)
+→ 120M input and 10M output tokens/day. At $3 per GPU-hour and four GPUs running
+24 hours, the cost is $288/day, or **$28.80 per million output tokens**. Before
+claiming capacity, load-test ~1.16 requests/s average plus bursts with this exact
+input/output mix. Input and output token rates are not interchangeable.
 
 **M4. Prefill FLOPs for a 576-token image + 128-text prompt on 7B.**
 → ≈ 2·N·(576+128) ≈ 2·7×10⁹·704 ≈ **10 TFLOP** (matmul term; attention adds a small
 S² term). "Image is ~80% of the prefill cost — that's the token-budget argument."
 
 **M5. LoRA param count: 7B, r=128, applied to q,k,v,o of 32 layers, D=4096.**
-→ 4 matrices × 32 layers × 2·r·D = 128 × 8.4M ≈ **~1.1×10⁹ → ~15% of the model**
-at r=128 (hence "big-rank LoRA" when reshaping behavior; r=16 → ~2%).
+→ Assuming all four matrices are square, `4 × 32 × 128 × (4096+4096)` =
+**134,217,728 parameters**, about 1.9% of 7B. With GQA, K and V have narrower
+output widths; use each matrix's actual input and output widths.
 
 **M6. Tokens for a 2×2 tiled 448-px image, LLaVA-NeXT-style, ViT-14 @336/tile.**
 → 576 global + 4×576 tiles = **2880**; + 2k text → ~5k context → KV @128 KB/token
 ≈ 640 MB. "This is why we cap tiles and prefix-cache images."
+
+### Worked example: defend a connector on the whiteboard
+
+**Why:** the interviewer asks you to cut document latency without making small
+serial numbers unreadable. “Pool the image tokens” is a proposal, not evidence.
+
+**What:** a 336-pixel view starts with 576 patches. A 2×2 pool gives 144 decoder
+tokens, saving 432 tokens or **54 MiB of decoder KV per retained image** at
+128 KiB/token. That leaves encoder work unchanged. In contrast, a smaller
+input reduces encoder work but may remove text before the connector sees it.
+
+**How:** say what would make you choose one option: “I'll measure exact match
+on short serial numbers by character size, and p95 time to first token on the
+same request mix. If pooling fails the OCR gate, I'll test a higher-budget crop
+path and count crop-selection failures.” End by stating the baseline you would
+keep if neither candidate passes. See [Chapter 5](ch05-bridging-vision-to-language.md)
+for the full comparison.
 
 ## 12.4 Deep-dive questions (answer *skeletons*)
 

@@ -63,9 +63,28 @@ petabyte clip bank into a *labeled* long-tail catalog — the thing your sim and
 your E2E training both starve for. (LLaVA's data engine, §6.11, was this trick on
 the web; here it's your fleet.)
 
-**Check:** why prefilter with the BEV stack before calling the VLM? → *cost: VLM
-inference is 3–4 orders of magnitude more expensive than BEV inference. The cheap
-system pays the attention of the expensive system.*
+**Check:** why prefilter before calling a VLM on the whole archive? → *fewer
+clips need expensive review, but the trigger can hide the events you most want
+to discover. Measure that miss rate separately.*
+
+### Worked example: find unusual clips without hiding the missed ones
+
+**Why:** a shortlist can look excellent to reviewers while missing the entire
+class of construction detours that never triggered the original detector.
+
+**What:** suppose the archive contains 100,000 clips and a cheap trigger sends
+5,000 to a VLM for offline tagging. That's 20× fewer VLM calls than reviewing
+every clip with the VLM, not necessarily 20× lower total cost. If human reviewers
+find 150 valid detours in the first 300 ranked results, precision@300 is 50%.
+That tells you about the review queue, not the fraction of all detours found.
+
+**How:** review a stratified sample of both accepted and rejected clips and
+record each stratum's sampling rate, so you can estimate how many true events
+the trigger missed. Separately check whether the VLM ranks accepted clips well.
+If rejects contain many true detours, expand or diversify the trigger before
+replacing the VLM. If recall at the trigger is adequate but the queue is noisy,
+change the ranking prompt or rubric. Keep the output as an offline candidate
+label until reviewed; it is not a driving command.
 
 ## 10.4 Role B — language as a supervisory signal
 

@@ -169,6 +169,25 @@ context length, KV memory, and prefill FLOPs.*
 | EMMA / OpenEMMA | B→VLA | VLM that also emits trajectories (Ch 10) |
 | GAIA-1 | world model | diffusion video gen for sim (Ch 10) |
 
+### Worked example: one dashboard photo, three different jobs
+
+**Why:** “understand the dashboard” could mean finding similar photos, reading
+the odometer, or locating it. Those jobs require different outputs.
+
+**What:** suppose the photo shows `10482` miles. A two-tower model can rank
+candidate captions such as “an illuminated dashboard” above unrelated text, but
+its score is not a generated answer or a box. An encoder–connector–decoder model
+can take “What mileage is displayed?” and generate `10482`. If the task needs
+the dial's position, require a box in an explicit coordinate system rather than
+assuming that a correct answer implies correct localization.
+
+**How:** test each output separately. Measure retrieval recall for similar
+photos, exact match for mileage, and box IoU for localization. Add a second photo
+that differs only in the last digit: if both photos retrieve the same dashboard
+caption, that's fine; if both produce `10482`, the reader failed the OCR task.
+See [Chapter 5](ch05-bridging-vision-to-language.md) for how the connector can
+affect that last digit.
+
 ## 1.11 ❓ Interview — "Walk me through an image + question in a VLM"
 
 Ninety seconds, five beats:

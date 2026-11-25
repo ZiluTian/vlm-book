@@ -193,11 +193,29 @@ step 0 (prefill):  K,V of tokens [1..S]      → cache [S, D_kv]
 step 1:            K,V of token [S+1]        → cache [S+1, D_kv]
 step 2:            K,V of token [S+2]        → cache [S+2, D_kv]
 ...
-attention at step n: q_n · K[1..S+n]  →  only NEW q is computed; K,V are REUSED
+attention at step n: q_n · K[1..S+n]  →  compute new q,k,v; reuse earlier K,V
 ```
 
-Nothing is recomputed. That's the win — and that's why the cache is the model's
-*working set*, and serving is a cache-management problem.
+The old tokens' K and V are not recomputed. The new token still runs through
+the decoder and attends to the cached history.
+
+### Worked example: follow one visual prompt into decode
+
+**Why:** context length tells you how many positions the decoder sees; it doesn't
+tell you how many heads or bytes it stores at each position.
+
+**What:** use two visual embeddings and three text tokens. To keep the tensors
+small, take one layer, four query heads, two KV heads, and head dimension four.
+Prefill produces `Q [5, 4, 4]`, `K [5, 2, 4]`, and `V [5, 2, 4]` (batch
+omitted). Each pair of query heads reads one shared KV head. The position-4
+logits predict token 5; the decoder doesn't have token 5's KV yet.
+
+**How:** feed the sampled token 5 back in. The model computes its `Q [1, 4, 4]`
+and `K,V [1, 2, 4]` each. Append K and V, then let the new query attend to all
+six positions to predict token 6. With FP16, KV grows from `2 × 5 × 2 × 4 × 2`
+= 160 bytes to 192 bytes for this layer. To test a cache implementation, compare
+its final logits against a fresh forward over all six positions, using the same
+positions and attention mask; compare within numerical tolerance.
 
 🔗 **BEV bridge:** this is your temporal BEV cache — except it grows without bound
 until the context window closes, so it's a memory-planning problem, not a fixed buffer.
@@ -215,7 +233,7 @@ Do both in the interview. If you slip a factor of two (forget K *and* V),
 say so and fix it out loud — self-correction reads as competence.
 
 **Check:** a 70B model, 80 layers, 8 kv heads, head_dim 128, fp16, 32k context —
-KV memory per user? → *2·80·8·128·2 B = 320 KB/token → ×32k ≈ 10 GB. That's your
+KV memory per user? → *2·80·8·128·2 B = 320 KiB/token → ×32,768 = 10 GiB. That's your
 answer, with arithmetic shown.*
 
 ## 2.15 Where CV intuition breaks

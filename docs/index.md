@@ -38,14 +38,13 @@ hide:
 
 ## Pick a reading route
 
-**Want to understand the mechanism, not just remember the answer?** Start with
-the **Why → What → How** worked examples: [false negatives in CLIP](ch03-clip-contrastive-pretraining.md#worked-example-the-hard-negative-that-isnt-negative),
-[resize, tile, or crop](ch04-vision-encoders.md#worked-example-resize-tile-or-crop),
-[OCR after compression](ch05-bridging-vision-to-language.md#worked-example-why-did-ocr-get-worse-after-compression),
-[the first supervised token](ch06-llava-the-blueprint.md#worked-example-trace-the-first-supervised-token),
-[LoRA training memory](ch07-finetuning-and-alignment.md#worked-example-what-lora-saves-and-what-it-doesnt),
-[KV under burst load](ch09-inference-and-serving.md#worked-example-budget-a-burst-of-document-questions),
-and [testing whether the model used the image](ch11-evaluation.md#worked-example-did-the-model-use-the-image-or-guess-from-the-prompt).
+**Want to understand the mechanism, not just remember the answer?** Each chapter
+has a **Why → What → How** worked example:
+
+- **Foundations:** [one photo, three tasks](ch01-the-landscape.md#worked-example-one-dashboard-photo-three-different-jobs), [the first decode step](ch02-the-llm-refresher.md#worked-example-follow-one-visual-prompt-into-decode), [false negatives in CLIP](ch03-clip-contrastive-pretraining.md#worked-example-the-hard-negative-that-isnt-negative), [resize, tile, or crop](ch04-vision-encoders.md#worked-example-resize-tile-or-crop), [OCR after compression](ch05-bridging-vision-to-language.md#worked-example-why-did-ocr-get-worse-after-compression).
+- **The blueprint:** [the first supervised token](ch06-llava-the-blueprint.md#worked-example-trace-the-first-supervised-token), [LoRA training memory](ch07-finetuning-and-alignment.md#worked-example-what-lora-saves-and-what-it-doesnt), [a warning light between frames](ch08-the-frontier.md#worked-example-the-warning-light-between-sampled-frames).
+- **Production:** [KV under burst load](ch09-inference-and-serving.md#worked-example-budget-a-burst-of-document-questions), [audit a fleet-data shortlist](ch10-vlms-for-autonomous-driving.md#worked-example-find-unusual-clips-without-hiding-the-missed-ones), [did the model use the image?](ch11-evaluation.md#worked-example-did-the-model-use-the-image-or-guess-from-the-prompt).
+- **Interview:** [defend a connector on the whiteboard](ch12-interview-playbook.md#worked-example-defend-a-connector-on-the-whiteboard).
 
 **Interview tomorrow?** Read the [architecture map](ch01-the-landscape.md), [decoder essentials](ch02-the-llm-refresher.md), [LLaVA walkthrough](ch06-llava-the-blueprint.md), and [serving math](ch09-inference-and-serving.md). Then close the book and try the [interview problems](ch12-interview-playbook.md).
 

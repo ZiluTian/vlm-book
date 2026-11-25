@@ -34,10 +34,10 @@ spatial compression. 'Native' means no *alignment* boundary, not no *compression
 
 One frame = a grid of tokens. A clip = many grids. Two problems:
 
-1. **Time in positions:** Qwen2-VL's **mRoPE** assigns each token a 3-tuple
-   `(t, h, w)`; text tokens get `(i, 0, 0)`, a frame's patches get
-   `(t, h_row, w_col)`. RoPE now encodes *4D geometry* — one mechanism for text,
-   images, and video.
+1. **Time in positions:** Qwen2-VL's **M-RoPE** uses three axes `(t, h, w)`.
+   Text uses the same position index on all three axes; visual tokens use
+   time, row, and column indices. Position encoding tells the model where a
+   retained token came from; it cannot restore a frame that was never sampled.
 2. **Token explosion:** 16 frames × 576 = 9216 tokens before the question.
    Fixes, in increasing order of aggression:
    - **temporal pooling:** pair consecutive frames, mean-pool → half the tokens
@@ -53,6 +53,26 @@ keyframe selection exists.*
 🔗 **BEV bridge:** "full detail now, summary far back" is literally your temporal
 BEV with decimated history. The VLM community is rebuilding your stack, one
 attention layer at a time.
+
+### Worked example: the warning light between sampled frames
+
+**Why:** video compression can erase a short event even when each individual
+frame has enough spatial detail. A dashboard warning visible for 200 ms can
+fall entirely between samples taken every 500 ms.
+
+**What:** a four-second clip sampled at 8 fps gives 32 frames. If each frame
+contributes 144 decoder tokens (the 2×2 pooling example in [Chapter 5](ch05-bridging-vision-to-language.md)),
+that's 4,608 tokens. At 2 fps you get eight frames and 1,152 tokens. Spatial
+compression changes what survives *inside* a frame; sampling changes which
+moments the model can see at all.
+
+**How:** compare uniform sampling against a hybrid that keeps eight overview
+frames plus up to eight distinct frames around an independently flagged event
+(at most 2,304 tokens). First test a window centered on the annotated event to
+see what denser sampling could recover, then use the real trigger and report
+its miss rate. Measure warning-light recall by event duration, false alarms on
+no-event clips, and latency. A higher score on long events alone does not show
+that the short-event failure was fixed.
 
 ## 8.3 The token-efficiency war (the engineering story of 2024–26)
 
