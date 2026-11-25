@@ -20,9 +20,25 @@ doesn't supply class IDs or any explicit wrong answers.
 
 ## 3.2 The two towers
 
+**What has to match?** The widths of the **projected embeddings**, not the
+widths of the image and text encoders. In this example, the image encoder
+outputs a pooled vector of width `768` and the text encoder one of width `512`.
+Each tower has its own learned projection into the same `D`-dimensional space:
+
+```text
+image: [B, 768] ── image projection ──► [B, D] ── normalize ──► I
+text:  [B, 512] ── text projection  ──► [B, D] ── normalize ──► T
+cosine similarities: I @ T.T = [B, D] @ [D, B] → [B, B]
+```
+
+**Why:** a dot product multiplies corresponding coordinates, so `[768] · [512]`
+is undefined. Matching widths makes the calculation possible; contrastive
+training makes the scores meaningful. Even if the raw widths happen to match,
+the two encoders don't automatically represent information in the same space.
+
 ```python
 class ClipModel:
-    def __init__(self):
+    def __init__(self, D):
         self.vit   = ViT(patch=14, depth=12, D=768)      # image tower
         self.xfmr  = TextTransformer(depth=12, D=512)    # text tower
         self.img_proj = Linear(768, D)                   # common output width D
@@ -40,8 +56,9 @@ Note: the towers **never exchange activations**. They meet exactly once, at the
 similarity matrix. That decoupling is what makes inference cheap (cache either side).
 
 **What comes out for our batch?** One vector per photo and one per caption.
-Imagine both towers project to `D = 4` instead of a real model's hundreds of
-dimensions. Here are invented unit vectors chosen to make the dot products easy:
+The toy example uses `D = 4` *after* projection and normalization. It doesn't
+assume either encoder is four-dimensional. Here are invented unit vectors
+chosen to make the dot products easy:
 
 | Pair | Image embedding | Caption embedding |
 |---|---|---|
